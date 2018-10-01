@@ -82,6 +82,96 @@ def find_autocorrelogram_peaks(autocorrelation_map):
     field_properties = measure.regionprops(autocorr_map_labels)
     return field_properties
 
+# calculate distances between the middle of the rate map autocorrelogram and the field centres
+def find_field_distances_from_mid_point(autocorr_map, field_properties):
+    distances = []
+    mid_point_coord_x = np.ceil(autocorr_map.shape[0] / 2)
+    mid_point_coord_y = np.ceil(autocorr_map.shape[1] / 2)
+
+    for field in range(len(field_properties)):
+        field_central_x = field_properties[field].centroid[0]
+        field_central_y = field_properties[field].centroid[1]
+        distance = np.sqrt(np.square(field_central_x - mid_point_coord_x) + np.square(field_central_y - mid_point_coord_y))
+        distances.append(distance)
+    return distances
+
+
+'''
+Grid spacing/wavelength:
+Defined by Hafting, Fyhn, Molden, Moser, Moser (2005) as the distance from the central autocorrelogram peak to the
+vertices of the inner hexagon in the autocorrelogram (the median of the six distances). This should be in cm.
+'''
+
+
+def calculate_grid_spacing(field_distances, bin_size):
+    grid_spacing = np.median(field_distances) * bin_size
+    return grid_spacing
+
+
+'''
+Defined by Wills, Barry, Cacucci (2012) as the square root of the area of the central peak of the autocorrelogram
+divided by pi. (This should be in cm2.)
+'''
+
+
+def calculate_field_size(field_properties, field_distances, bin_size):
+    central_field_index = np.argmin(field_distances)
+    field_size_pixels = field_properties[central_field_index].area  # number of pixels in central field
+    field_size = np.sqrt(field_size_pixels * np.squeeze(bin_size)) / np.pi
+    return field_size
+
+
+# https://stackoverflow.com/questions/481144/equation-for-testing-if-a-point-is-inside-a-circle
+def in_circle(center_x, center_y, radius, x, y):
+    square_dist = (center_x - x) ** 2 + (center_y - y) ** 2
+    return square_dist <= radius ** 2
+
+
+#  replace values not in the grid ring with nan
+def remove_inside_and_outside_of_grid_ring(autocorr_map, field_properties, field_distances):
+    ring_distances = get_ring_distances(field_distances)
+    inner_radius = (np.mean(ring_distances) * 0.5) / 2
+    outer_radius = (np.mean(ring_distances) * 2.5) / 2
+    center_x = field_properties[np.argmin(field_distances)].centroid[0]
+    center_y = field_properties[np.argmin(field_distances)].centroid[1]
+    for row in range(autocorr_map.shape[0]):
+        for column in range(autocorr_map.shape[1]):
+            in_ring = in_circle(center_x, center_y, outer_radius, row, column)
+            in_middle = in_circle(center_x, center_y, inner_radius, row, column)
+            if not in_ring or in_middle:
+                autocorr_map[row, column] = np.nan
+    return autocorr_map
+
+
+'''
+Defined by Krupic, Bauza, Burton, Barry, O'Keefe (2015) as the difference between the minimum correlation coefficient
+for autocorrelogram rotations of 60 and 120 degrees and the maximum correlation coefficient for autocorrelogram
+rotations of 30, 90 and 150 degrees. This score can vary between -2 and 2, although generally values above
+below -1.5 or above 1.5 are uncommon.
+'''
+
+
+# TODO this gives different results relative to the matlab script -  need to find out why
+def calculate_grid_score(autocorr_map, field_properties, field_distances):
+    correlation_coefficients = []
+    for angle in range(30, 180, 30):
+        autocorr_map_to_rotate = np.nan_to_num(autocorr_map)
+        rotated_map = rotate(autocorr_map_to_rotate, angle, reshape=False)  # todo fix this
+        rotated_map_binary = np.round(rotated_map)
+        autocorr_map_ring = remove_inside_and_outside_of_grid_ring(autocorr_map, field_properties, field_distances)
+        rotated_map_ring = remove_inside_and_outside_of_grid_ring(rotated_map_binary, field_properties, field_distances)
+        autocorr_map_ring_to_correlate, rotated_map_ring_to_correlate = remove_nans(autocorr_map_ring, rotated_map_ring)
+        pearson_coeff = np.corrcoef(autocorr_map_ring_to_correlate, rotated_map_ring_to_correlate)[0][1]
+        correlation_coefficients.append(pearson_coeff)
+    grid_score = min(correlation_coefficients[i] for i in [1, 3]) - max(correlation_coefficients[i] for i in [0, 2, 4])
+    return grid_score
+
+
+def get_ring_distances(field_distances_from_mid_point):
+    field_distances_from_mid_point = np.array(field_distances_from_mid_point)[~np.isnan(field_distances_from_mid_point)]
+    ring_distances = np.sort(field_distances_from_mid_point)[1:7]
+    return ring_distances
+
 
 
 def calculate_grid_metrics(autocorr_map, field_properties):
